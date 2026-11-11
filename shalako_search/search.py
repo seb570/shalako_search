@@ -82,3 +82,57 @@ def cint_safe(v) -> int:
 		return int(v or 0)
 	except (TypeError, ValueError):
 		return 0
+
+
+# ---------------------------------------------------------------------------
+# Full search (Ctrl+G / "Search for ...") clean-up.
+# The search itself is unchanged (it still matches customer names, item codes etc.);
+# this only re-orders the groups and trims the columns shown for each result.
+# ---------------------------------------------------------------------------
+
+# Groups listed here come first, in this order; everything else follows in the
+# order set in Global Search Settings.
+GROUP_ORDER = ["Customer", "Issue", "Sales Order", "Sales Invoice", "Payment Entry", "Lead"]
+
+# Columns to show instead of the raw indexed fields: (column label, fieldname).
+# The record's title (e.g. the customer name) is already shown in the Name column.
+SLIM_COLUMNS = {
+	"Sales Order": [("Order No", "name"), ("Status", "status")],
+	"Sales Invoice": [("Invoice No", "name"), ("Status", "status")],
+	"Issue": [("Case No", "name"), ("Status", "status"), ("Stage", "custom_stage")],
+}
+
+
+@frappe.whitelist()
+def global_search(text: str, start: int = 0, limit: int = 20, doctype: str = ""):
+	from frappe.desk.doctype.global_search_settings.global_search_settings import (
+		get_doctypes_for_global_search,
+	)
+	from frappe.utils.global_search import search
+
+	results = search(text, start=start, limit=limit, doctype=doctype) or []
+
+	settings_order = list(get_doctypes_for_global_search() or [])
+	order = GROUP_ORDER + [d for d in settings_order if d not in GROUP_ORDER]
+	pos = {d: i for i, d in enumerate(order)}
+	results.sort(key=lambda r: pos.get(r.get("doctype"), len(order)))  # stable: keeps rank within a group
+
+	for r in results:
+		cols = SLIM_COLUMNS.get(r.get("doctype"))
+		if not cols:
+			continue
+		try:
+			meta = frappe.get_meta(r.doctype)
+			fields = [f for _, f in cols if f == "name" or meta.has_field(f)]
+			vals = frappe.db.get_value(r.doctype, r.name, fields, as_dict=True) or {}
+			parts = []
+			for label, f in cols:
+				v = r.name if f == "name" else vals.get(f)
+				if v:
+					parts.append(f"{label} : {cstr(v)}")
+			if parts:
+				r["content"] = " ||| ".join(parts)
+		except Exception:
+			pass
+
+	return results
